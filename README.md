@@ -9,6 +9,10 @@
 - 零额外依赖：Python 标准库 + 系统自带 tkinter，单文件，双击启动、桌面窗口，**不用开浏览器**
 - 不上传任何数据；API Key 只存本机
 
+## 界面
+
+![LoRAHoard 界面](screenshot.jpg)
+
 ## 为什么做
 
 自己动手写一个轻量、免费、开源的工具：**只要本体 + 元数据 + 已下载/更新状态**，花哨功能一概不要。
@@ -91,6 +95,7 @@ Key 只存在本机 `下载目录/api_key.txt`，不上传任何地方。
 ```
 CoralLoRA/
 ├── CoralLoRA_gui.py    # 桌面版：零依赖 Python（tkinter + urllib）
+├── screenshot.jpg      # 界面截图
 ├── config.txt          # 记住你选的下载/扫描目录（自动生成）
 ├── server.py           # 旧网页版后端（保留）
 ├── index.html          # 旧网页版前端（保留）
