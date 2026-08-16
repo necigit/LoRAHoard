@@ -4,7 +4,7 @@
 
 免费、开源、零依赖的 **Civitai（C站）模型浏览/下载桌面工具**（作者：@Ne）。
 
-- **基于 Civitai 官方公开 API**（civitai.com / civitai.red 双源直连）——非爬虫、无逆向、无浏览器插件
+- **基于 Civitai 官方公开 API**（civitai.com / civitai.red 双源直连）
 - **永久免费**：无订阅、无付费墙、无云同步、无广告、无远程授权
 - 零额外依赖：Python 标准库 + 系统自带 tkinter，单文件，双击启动、桌面窗口，**不用开浏览器**
 - 不上传任何数据；API Key 只存本机
