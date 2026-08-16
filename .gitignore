@@ -1,0 +1,7 @@
+# API key 绝不入库（开源前必须确认此文件被忽略）
+api_key.txt
+# 机器相关的目录配置
+config.txt
+# Python 缓存
+__pycache__/
+*.pyc

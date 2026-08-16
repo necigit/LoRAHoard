@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🪸 Coral LoRA 拉取器</title>
+<style>
+  :root {
+    --bg: #17151f; --panel: #211d2e; --panel2: #2a2440;
+    --fg: #e8e5f0; --muted: #8f89a5; --accent: #6758d4; --accent2: #8b7cf0;
+    --ok: #4ade80; --err: #f87171; --border: #352e4d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.6 system-ui, "Segoe UI", sans-serif; min-height: 100vh; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 20px; }
+  header h1 { font-size: 22px; letter-spacing: -.02em; }
+  header h1 span { color: var(--accent2); }
+  .tag { font-size: 11px; color: var(--muted); background: var(--panel); padding: 3px 10px; border-radius: 999px; }
+  .searchbar { display: flex; gap: 10px; margin-bottom: 16px; }
+  input[type=text], input[type=password], select {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 14px; font: inherit; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .searchbar input { flex: 1; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 10px;
+    padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
+    transition: filter .15s;
+  }
+  button:hover { filter: brightness(1.15); }
+  button.ghost { background: var(--panel2); color: var(--fg); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 18px; }
+  .tabs button { background: transparent; color: var(--muted); font-weight: 500; padding: 8px 16px; }
+  .tabs button.on { background: var(--panel2); color: var(--fg); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .card .thumb { aspect-ratio: 1; background: var(--panel2) center/cover no-repeat; position: relative; }
+  .card .thumb .nsfw-badge { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.6); color: #ffd; font-size: 10px; padding: 2px 8px; border-radius: 999px; }
+  .card .body { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .card .name { font-weight: 650; font-size: 13.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .card .meta { font-size: 11.5px; color: var(--muted); }
+  .card .words { font-size: 11.5px; color: var(--accent2); word-break: break-all; max-height: 34px; overflow: hidden; }
+  .card .actions { margin-top: auto; display: flex; gap: 8px; }
+  .card .actions button { flex: 1; padding: 8px 10px; font-size: 12.5px; }
+  .card .dl-progress { font-size: 11px; color: var(--ok); padding-top: 4px; }
+  .card .dl-progress .bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .card .dl-progress .bar i { display: block; height: 100%; background: var(--accent2); transition: width .3s; }
+  .empty { color: var(--muted); text-align: center; padding: 60px 0; font-size: 13px; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); color: var(--fg);
+    padding: 10px 22px; border-radius: 999px; font-size: 13px; opacity: 0;
+    transition: opacity .25s; pointer-events: none; z-index: 9; max-width: 80vw;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--err); color: var(--err); }
+  .settings { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; display: grid; gap: 12px; max-width: 560px; }
+  .settings label { font-size: 12px; color: var(--muted); display: grid; gap: 6px; }
+  .settings .hint { font-size: 11.5px; color: var(--muted); }
+  .local-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .local-row .fname { flex: 1; font-size: 13px; word-break: break-all; }
+  .local-row .fsize { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .local-row .tags { color: var(--accent2); font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🪸 Coral <span>LoRA</span> 拉取器</h1>
+    <span class="tag" id="dirTag">目录…</span>
+    <span class="tag" id="keyTag">key…</span>
+  </header>
+
+  <div class="searchbar">
+    <input id="q" type="text" placeholder="搜 LoRA，如：anime 风格 / 某角色名 / 画风关键词…" onkeydown="if(event.key==='Enter')search()">
+    <select id="sort">
+      <option>Most Downloaded</option>
+      <option>Most Discussed</option>
+      <option>Newest</option>
+      <option>Highest Rated</option>
+    </select>
+    <button onclick="search()">搜 索</button>
+  </div>
+
+  <div class="tabs">
+    <button id="tab-search" class="on" onclick="showTab('search')">🔍 搜索</button>
+    <button id="tab-local" onclick="showTab('local')">📁 已下载</button>
+    <button id="tab-settings" onclick="showTab('settings')">⚙️ 设置</button>
+  </div>
+
+  <div id="panel-search">
+    <div id="grid" class="grid"></div>
+  </div>
+
+  <div id="panel-local" style="display:none">
+    <div id="local-list" style="display:grid; gap:8px"></div>
+  </div>
+
+  <div id="panel-settings" style="display:none">
+    <div class="settings">
+      <label>Civitai API Key（可选，部分模型需登录下载）
+        <input id="key" type="password" placeholder="https://civitai.com/settings 里生成，填了才能下 NSFW/登录模型">
+      </label>
+      <div class="hint">Key 只保存在本机下载目录下的 api_key.txt，不会上传任何地方。</div>
+      <div><button onclick="saveKey()">保存 Key</button></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (kb) => kb == null ? '—' : (kb >= 1048576 ? (kb/1048576).toFixed(1)+'GB' : kb >= 1024 ? (kb/1024).toFixed(1)+'MB' : Math.round(kb)+'KB');
+
+function toast(msg, isErr) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.className = 'toast', 2600);
+}
+
+function showTab(name) {
+  for (const id of ['search','local','settings']) {
+    $('#panel-' + id).style.display = id === name ? '' : 'none';
+    $('#tab-' + id).className = id === name ? 'on' : '';
+  }
+  if (name === 'local') loadLocal();
+  if (name === 'settings') loadSettings();
+}
+
+// ---------- 搜索 ----------
+let dlPoller = null;
+async function search() {
+  const q = $('#q').value.trim();
+  if (!q) { toast('先输入关键词', true); return; }
+  const sort = $('#sort').value;
+  const grid = $('#grid');
+  grid.innerHTML = '<div class="empty">搜索中…</div>';
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}`);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    grid.innerHTML = '';
+    if (!d.items.length) { grid.innerHTML = '<div class="empty">没搜到，换个词试试</div>'; return; }
+    d.items.forEach(renderCard);
+    startProgressPoll();
+  } catch (e) {
+    grid.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+
+function renderCard(m) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  const thumb = m.cover
+    ? `style="background-image:url('${m.cover}')"`
+    : '';
+  const words = (m.trainedWords || []).slice(0, 3).map(w => '`' + w + '`').join(' ');
+  card.innerHTML = `
+    <div class="thumb" ${thumb}>
+      ${m.nsfw ? '<span class="nsfw-badge">NSFW</span>' : ''}
+    </div>
+    <div class="body">
+      <div class="name">${esc(m.name || '')}</div>
+      <div class="meta">${m.creator ? 'by ' + esc(m.creator) + ' · ' : ''}${fmt(m.file && m.file.sizeKB)}${m.baseModel ? ' · ' + esc(m.baseModel) : ''}</div>
+      ${words ? `<div class="words">${words}</div>` : ''}
+      <div class="actions">
+        <button onclick="downloadItem(${JSON.stringify(m).replace(/"/g, '&quot;')})" id="dl-${m.id}">⬇ 下载</button>
+        <button class="ghost" onclick="window.open('${m.modelUrl}','_blank')">详情 ↗</button>
+      </div>
+      <div class="dl-progress" id="prog-${m.id}" style="display:none"></div>
+    </div>`;
+  $('#grid').appendChild(card);
+}
+
+async function downloadItem(m) {
+  const btn = document.getElementById('dl-' + m.id);
+  btn.disabled = true;
+  btn.textContent = '排队中…';
+  try {
+    const r = await fetch('/api/download', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({ url: m.file && m.file.downloadUrl, name: m.name, meta: m }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    btn.textContent = '已开始 ⬇';
+    startProgressPoll();
+  } catch (e) {
+    btn.textContent = '重试';
+    btn.disabled = false;
+    toast(e.message, true);
+  }
+}
+
+function startProgressPoll() {
+  if (dlPoller) return;
+  dlPoller = setInterval(async () => {
+    try {
+      const r = await fetch('/api/progress');
+      const d = await r.json();
+      if (!d.ok) return;
+      let any = false;
+      for (const [id, dl] of Object.entries(d.downloads)) {
+        any = true;
+        const el = document.querySelector(`[id^="prog-"]`);
+        // 通过文件目标名关联展示（简单处理：全局进度条区）
+      }
+      renderGlobalProgress(d.downloads);
+      const active = Object.values(d.downloads).filter(x => x.status === 'downloading').length;
+      if (active === 0) { clearInterval(dlPoller); dlPoller = null; }
+    } catch (e) { /* 轮询失败忽略 */ }
+  }, 800);
+}
+
+function renderGlobalProgress(downloads) {
+  let el = $('#global-prog');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'global-prog';
+    el.style.cssText = 'position:fixed;bottom:70px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:12px 18px;font-size:12.5px;min-width:300px;z-index:8';
+    document.body.appendChild(el);
+  }
+  const lines = Object.entries(downloads).map(([id, dl]) => {
+    const pct = dl.total ? Math.round(dl.done / dl.total * 100) : 0;
+    const state = dl.status === 'downloading' ? `${pct}% ${fmt(dl.done/1024)}` : dl.status === 'done' ? '✅ 完成' : `⚠️ ${dl.status}`;
+    return `<div style="margin-bottom:6px"><div>${esc(dl.file.split(/[\\/]/).pop())}</div>
+      <div class="bar" style="height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:3px"><i style="display:block;height:100%;width:${pct}%;background:var(--accent2);transition:width .3s"></i></div>
+      <div style="color:var(--muted);font-size:11px">${state}</div></div>`;
+  }).join('');
+  el.innerHTML = lines || '<div style="color:var(--muted)">空闲</div>';
+  if (!Object.keys(downloads).length) el.remove();
+}
+
+// ---------- 已下载 ----------
+async function loadLocal() {
+  const box = $('#local-list');
+  box.innerHTML = '<div class="empty">读取中…</div>';
+  try {
+    const r = await fetch('/api/local');
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    box.innerHTML = '';
+    if (!d.items.length) { box.innerHTML = '<div class="empty">还没有下载过 LoRA。去搜索页拉几个吧 🪸</div>'; return; }
+    d.items.forEach(it => {
+      const m = it.meta;
+      const words = m && m.trainedWords ? m.trainedWords.slice(0,3).map(w=>'`'+w+'`').join(' ') : '';
+      const row = document.createElement('div');
+      row.className = 'local-row';
+      row.innerHTML = `
+        <div style="flex:0 0 auto">🪸</div>
+        <div style="flex:1;min-width:0">
+          <div class="fname">${esc(it.file)}</div>
+          ${words ? `<div class="tags">${words}</div>` : ''}
+          ${m && m.name ? `<div class="tags" style="color:var(--muted)">${esc(m.name)}${m.creator?' · by '+esc(m.creator):''}</div>` : ''}
+        </div>
+        <div class="fsize">${it.sizeMB} MB</div>`;
+      box.appendChild(row);
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+
+// ---------- 设置 ----------
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    if (d.ok) {
+      $('#dirTag').textContent = '📁 ' + d.dir;
+      $('#keyTag').textContent = d.hasKey ? '🔑 key 已配置' : '🔑 key 未配置';
+      $('#key').value = '';
+    }
+  } catch (e) { /* 忽略 */ }
+}
+async function saveKey() {
+  const key = $('#key').value.trim();
+  try {
+    const r = await fetch('/api/key', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({ key }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    toast(d.hasKey ? 'Key 已保存 🔑' : 'Key 已清除');
+    loadSettings();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------- 工具 ----------
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadSettings();
+</script>
+</body>
+</html>
