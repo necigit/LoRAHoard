@@ -1083,7 +1083,6 @@ class CoralApp(tk.Tk):
         self.q_entry.bind("<Return>", lambda e: self._browse())
 
         ttk.Button(ctl, text="搜索", style="Accent.TButton", command=self._browse).pack(side="left", padx=(8, 0))
-        ttk.Button(ctl, text="链接/ID打开", command=self._open_by_id).pack(side="left", padx=(4, 0))
 
         # 分类快捷按钮：不搜索也能按分类浏览
         chips = ttk.Frame(tab, padding=(0, 0, 0, 6))
@@ -1151,40 +1150,6 @@ class CoralApp(tk.Tk):
     def _browse_type(self, types_val):
         self._search_types = types_val
         self._browse()
-
-    def _open_by_id(self):
-        """按 C站模型链接或 ID 直接打开（EA / 未入搜索索引的模型搜不到时用）。
-        支持：https://civitai.com/models/12345 或纯数字 12345。"""
-        if self._busy:
-            return
-        raw = self.q_entry.get().strip()
-        mm = re.search(r"/models/(\d+)", raw) or re.search(r"(?:^|\D)(\d{4,})(?:\D|$)", raw)
-        if not mm:
-            messagebox.showwarning("无法识别",
-                                   "请输入 C站模型链接（如 https://civitai.com/models/12345）或纯数字模型 ID")
-            return
-        mid = mm.group(1)
-        tok = self._fetch_token + 1
-        self._fetch_token = tok
-        self._busy = True
-        self.scroll.clear()
-        self._covers.clear()
-        self._cover_cache.clear()
-        self.empty_lbl = tk.Label(self.scroll.inner, text="正在按 ID 打开模型…", bg=BG, fg=MUTED, pady=40)
-        self.empty_lbl.pack()
-        self.status_var.set(f"按 ID {mid} 打开中…")
-        threading.Thread(target=self._open_by_id_thread, args=(mid, tok), daemon=True).start()
-
-    def _open_by_id_thread(self, mid, tok):
-        try:
-            data = civitai_get(f"models/{mid}")
-            if not data or not data.get("id"):
-                self.q.put(("open_id", tok, None, "没有找到该模型（ID 不存在或已删除）"))
-                return
-            m = annotate_items([model_meta(data)])[0]  # 顺带打 ✓已下载 / 🔄有更新 标记
-            self.q.put(("open_id", tok, m, None))
-        except Exception as exc:  # noqa: BLE001
-            self.q.put(("open_id", tok, None, f"打开失败: {exc}"))
 
     def _page_go(self, delta):
         if self._busy or not self._pages:
@@ -2120,24 +2085,6 @@ class CoralApp(tk.Tk):
                     self._pages.append({"items": items, "cursors": cursors or {}, "has_more": has_more})
                     self._page_idx = len(self._pages) - 1
                     self._render_page()
-                elif kind == "open_id":
-                    _, tok, m, err = msg
-                    if tok != self._fetch_token:
-                        continue  # 过期响应（用户已改搜其它内容），丢弃
-                    self._busy = False
-                    if err:
-                        self.status_var.set(err)
-                        self._show_msg(err)
-                        self._set_nav_state()
-                        continue
-                    self._res_pat = None          # 打开单个模型时清掉旧过滤，避免被正则/标签挡掉
-                    self._res_tag = None
-                    self.res_re.delete(0, "end")
-                    self.res_tag.set("全部标签")
-                    self._pages = [{"items": [m], "cursors": {}, "has_more": False}]
-                    self._page_idx = 0
-                    self._render_page()
-                    self.status_var.set(f"已打开模型 #{mid}" + ("（EA/未入索引的模型可这样找到）" if (m.get("availability") or "Public") != "Public" else ""))
                 elif kind == "img_png":
                     _, mid, png = msg
                     try:
