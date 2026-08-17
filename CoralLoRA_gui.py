@@ -543,13 +543,63 @@ class _StripAuthRedirect(urllib.request.HTTPRedirectHandler):
         return new
 
 
+RETRY_CODES = (502, 503, 504, 429)  # 暂时性错误：服务器过载/限流，值得重试
+
+
+def alt_download_url(url: str) -> str | None:
+    """当前源的下载地址失败时换另一个源（civitai.com <-> civitai.red）再试一轮。"""
+    for a, b in (("civitai.red", "civitai.com"), ("civitai.com", "civitai.red")):
+        if a in url:
+            return url.replace(a, b)
+    return None
+
+
+def _open_download(url: str, headers: dict):
+    """打开下载流：503/502/504/429 自动重试（间隔递增，最多 3 次）；
+    当前源仍失败则换备用源（com<->red）再试一轮；连接失败也直接换源。"""
+    opener = urllib.request.build_opener(_StripAuthRedirect)
+    urls = [url]
+    alt = alt_download_url(url)
+    if alt and alt != url:
+        urls.append(alt)
+    last: Exception | None = None
+    for u in urls:
+        for i in range(4):
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": UA, **headers})
+                return opener.open(req, timeout=60)
+            except urllib.error.HTTPError as e:
+                last = e
+                if e.code in RETRY_CODES and i < 3:
+                    time.sleep(2 * (i + 1))
+                    continue
+                break  # 非暂时性错误或重试耗尽 → 换下一个源
+            except Exception as e:  # noqa: BLE001 连接/超时 → 换下一个源
+                last = e
+                break
+    raise last
+
+
+def dl_error_text(exc: Exception) -> str:
+    """把下载异常翻译成看得懂的话（503 是服务器暂时过载，403 是权限问题）。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 503:
+            return "C站/CDN 暂时过载(503)，自动重试+换源仍失败，请稍后再试"
+        if exc.code == 403:
+            return "需要权限(403)：该模型需登录/API key（设置页填 key，或换 civitai.com 源）"
+        if exc.code == 401:
+            return "未登录(401)：设置页填 API key 后重试"
+        if exc.code == 400:
+            return f"请求被拒(400)：{getattr(exc, 'reason', '')}"
+        return f"HTTP {exc.code}"
+    return str(exc) or type(exc).__name__
+
+
 def civitai_download(url: str, dest: Path, dl_id: str, headers: dict, q: queue.Queue) -> None:
     """流式下载到 dest（先 .part 后原子改名），进度经 q 上报给 GUI。
-    重定向时自动去 Authorization（否则 CDN/S3 后端 400）。"""
-    opener = urllib.request.build_opener(_StripAuthRedirect)
-    req = urllib.request.Request(url, headers={"User-Agent": UA, **headers})
+    503/502/504/429 自动重试 + 换源兜底；重定向时自动去 Authorization（否则 CDN/S3 后端 400）。"""
     try:
-        with opener.open(req, timeout=60) as resp:
+        with _open_download(url, headers) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             q.put(("dl", dl_id, {"file": str(dest), "total": total, "done": 0, "status": "downloading"}))
             tmp = dest.with_suffix(dest.suffix + ".part")
@@ -566,7 +616,7 @@ def civitai_download(url: str, dest: Path, dl_id: str, headers: dict, q: queue.Q
             tmp.replace(dest)
             q.put(("dl", dl_id, {"file": str(dest), "total": total, "done": done, "status": "done"}))
     except Exception as exc:  # noqa: BLE001
-        q.put(("dl", dl_id, {"file": str(dest), "total": 0, "done": 0, "status": f"error: {exc}"}))
+        q.put(("dl", dl_id, {"file": str(dest), "total": 0, "done": 0, "status": "error: " + dl_error_text(exc)}))
 
 
 def safe_name(name: str) -> str:
