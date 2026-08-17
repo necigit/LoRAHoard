@@ -518,7 +518,8 @@ def known_branches() -> list:
 
 
 def civitai_get(path: str, params: dict | None = None, headers: dict | None = None) -> dict:
-    """GET Civitai API，返回 JSON；异常抛 ValueError。已配置 key 时自动带鉴权。"""
+    """GET Civitai API，返回 JSON；异常抛 ValueError。已配置 key 时自动带鉴权。
+    503/502/504/429（服务器过载）自动重试，间隔递增。"""
     url = f"{CIVITAI_API}/{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
@@ -526,9 +527,21 @@ def civitai_get(path: str, params: dict | None = None, headers: dict | None = No
     key = api_key()
     if key and "Authorization" not in hdrs:
         hdrs["Authorization"] = f"Bearer {key}"
-    req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    for i in range(4):
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in RETRY_CODES and i < 3:
+                time.sleep(2 * (i + 1))
+                continue
+            raise
+        except Exception:  # noqa: BLE001 连接级失败也重试一轮
+            if i < 3:
+                time.sleep(2 * (i + 1))
+                continue
+            raise
 
 
 class _StripAuthRedirect(urllib.request.HTTPRedirectHandler):
@@ -782,6 +795,7 @@ def model_meta(model: dict) -> dict:
             "baseModel": vv.get("baseModel"),
             "sizeKB": (vf or {}).get("sizeKB"),
             "file": (vf or {}).get("name"),
+            "availability": vv.get("availability"),  # Public / EarlyAccess …
             "downloadUrl": (vf or {}).get("downloadUrl") or download_url_for(vv.get("id")),
         })
     base_models = sorted({str(x.get("baseModel")) for x in vlist if x.get("baseModel")})
@@ -790,6 +804,7 @@ def model_meta(model: dict) -> dict:
         "name": model.get("name"),
         "type": model.get("type"),
         "nsfw": model.get("nsfw"),
+        "availability": model.get("availability"),  # Public / EarlyAccess（早期访问）
         "creator": (model.get("creator") or {}).get("username"),
         "stats": model.get("stats") or {},
         "description": (model.get("description") or "")[:2000],
@@ -1331,6 +1346,8 @@ class CoralApp(tk.Tk):
                 badges.append(("🔄 有更新", WARN))
             else:
                 badges.append(("✓ 已下载" + ("?" if m.get("localMaybe") else ""), OK))
+        if (m.get("availability") or "Public") != "Public":
+            badges.append(("EA 早期访问", WARN))
         if m.get("nsfw"):
             badges.append(("NSFW", ERR))
         if badges:
@@ -1411,6 +1428,11 @@ class CoralApp(tk.Tk):
         info = self._ask_download_dir(m)  # 选 版本/基座 + 分支/用途 → 自动进 anima-style 这类目录
         if not info:
             return
+        if (info.get("availability") or "Public") != "Public":
+            if not messagebox.askyesno(
+                    "早期访问版本",
+                    "该版本是 Early Access（早期访问），通常需要 Civitai 账号订阅创作者后才能下载。\n\n仍要尝试下载吗？"):
+                return
         url = info.get("url") or f.get("downloadUrl")
         if not url:
             messagebox.showwarning("无法下载", "该模型没有可下载的文件")
@@ -1473,6 +1495,7 @@ class CoralApp(tk.Tk):
         ttk.Label(body, text="版本/基座").grid(row=0, column=0, sticky="w", pady=3)
         ver_cb = ttk.Combobox(body, state="readonly", width=38)
         ver_cb["values"] = [f"{x.get('name') or '?'} · {x.get('baseModel') or '?'}  ({(x.get('sizeKB') or 0) / 1024:.0f}MB)"
+                            + (" [EA 早期访问]" if (x.get("availability") or "Public") != "Public" else "")
                             for x in versions] or ["(无版本)"]
         ver_cb.current(0)
         ver_cb.grid(row=0, column=1, sticky="w", padx=8, pady=3)
@@ -1569,6 +1592,7 @@ class CoralApp(tk.Tk):
             result["kind"] = kind_canon(kind_cb.get())
             result["tags"] = [t.strip() for t in re.split(r"[,，]", kw_en.get()) if t.strip()]
             result["url"] = chosen.get("downloadUrl") or (m.get("file") or {}).get("downloadUrl")
+            result["availability"] = chosen.get("availability")
             result["versionId"] = chosen.get("id")
             result["version"] = chosen.get("name")
             result["baseModel"] = chosen.get("baseModel")

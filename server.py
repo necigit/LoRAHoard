@@ -149,17 +149,30 @@ def save_api_key(key: str) -> None:
 
 
 def civitai_get(path: str, params: dict | None = None, headers: dict | None = None) -> dict:
-    """GET Civitai API，返回 JSON；异常抛 ValueError。"""
+    """GET Civitai API，返回 JSON；异常抛 ValueError。
+    503/502/504/429（服务器过载）自动重试，间隔递增。"""
     url = f"{CIVITAI_API}/{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA,
-        "Accept": "application/json",
-        **(headers or {}),
-    })
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    hdrs = {"User-Agent": UA, "Accept": "application/json", **(headers or {})}
+    key = api_key()
+    if key and "Authorization" not in hdrs:
+        hdrs["Authorization"] = f"Bearer {key}"
+    for i in range(4):
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in RETRY_CODES and i < 3:
+                time.sleep(2 * (i + 1))
+                continue
+            raise
+        except Exception:  # noqa: BLE001 连接级失败也重试一轮
+            if i < 3:
+                time.sleep(2 * (i + 1))
+                continue
+            raise
 
 
 class _StripAuthRedirect(urllib.request.HTTPRedirectHandler):
@@ -291,6 +304,7 @@ def model_meta(model: dict) -> dict:
         "name": model.get("name"),
         "type": model.get("type"),
         "nsfw": model.get("nsfw"),
+        "availability": model.get("availability"),  # Public / EarlyAccess（早期访问）
         "creator": (model.get("creator") or {}).get("username"),
         "stats": model.get("stats") or {},
         "description": (model.get("description") or "")[:2000],
