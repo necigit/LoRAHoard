@@ -100,6 +100,159 @@ def save_config_api(api: str) -> None:
     _config_set("CORAL_LORA_API", api)
 
 
+# 每类模型的下载子目录（相对 DL_DIR）：默认 ComfyUI 标准目录名，
+# 可在设置页「下载目录映射」里改，持久化到 config.txt；环境变量 CORAL_LORA_SUBDIR_* 优先级最高。
+SUBDIR_KEYS = {
+    "LoRA": "CORAL_LORA_SUBDIR_LORA",
+    "Checkpoint": "CORAL_LORA_SUBDIR_CHECKPOINT",
+    "VAE": "CORAL_LORA_SUBDIR_VAE",
+    "Embedding": "CORAL_LORA_SUBDIR_EMBEDDING",
+    "ControlNet": "CORAL_LORA_SUBDIR_CONTROLNET",
+    "Other": "CORAL_LORA_SUBDIR_OTHER",
+}
+DEFAULT_SUBDIRS = {
+    "LoRA": "loras",
+    "Checkpoint": "checkpoints",
+    "VAE": "vae",
+    "Embedding": "embeddings",
+    "ControlNet": "controlnet",
+    "Other": "other",
+}
+
+
+def load_subdir_map() -> dict:
+    """类别 -> 下载子目录名（相对 DL_DIR）。优先级：环境变量 > config.txt > 默认。"""
+    out = dict(DEFAULT_SUBDIRS)
+    for cat, key in SUBDIR_KEYS.items():
+        v = (os.environ.get(key) or _config_get(key) or "").strip().strip("/\\")
+        if v:
+            out[cat] = v
+    return out
+
+
+def save_subdir_map(m: dict) -> None:
+    for cat, key in SUBDIR_KEYS.items():
+        v = (m.get(cat) or "").strip().strip("/\\")
+        _config_set(key, v if v else DEFAULT_SUBDIRS[cat])
+
+
+# 图片代理：原版 CDN image.civitai.com 国内直连不稳（概率加载不出预览图），
+# 抓封面时先试原地址、失败自动走代理兜底。{url} 是原图地址占位，填 off 关闭代理。
+IMG_PROXY_KEY = "CORAL_LORA_IMG_PROXY"
+DEFAULT_IMG_PROXY = "https://images.weserv.nl/?url={url}"  # 免费图片代理（Cloudflare 线路）
+
+
+def load_img_proxy() -> str:
+    """图片代理模板。优先级：环境变量 > config.txt；空 = 用默认 weserv。"""
+    return (os.environ.get(IMG_PROXY_KEY) or _config_get(IMG_PROXY_KEY) or "").strip()
+
+
+def save_img_proxy(v: str) -> None:
+    _config_set(IMG_PROXY_KEY, v.strip())
+
+
+def img_proxy_url(url: str) -> str | None:
+    """把图片 URL 套进代理模板；配置为 off/none/- 或代理不可用时返回 None。"""
+    tpl = load_img_proxy() or DEFAULT_IMG_PROXY
+    if tpl.lower() in ("off", "none", "-"):
+        return None
+    q = urllib.parse.quote(url, safe="")
+    return tpl.replace("{url}", q) if "{url}" in tpl else tpl.rstrip("/") + "?url=" + q
+
+
+def cover_candidates(url: str) -> list:
+    """封面候选抓取地址：原 CDN 优先，代理兜底（去重）。"""
+    small = cover_url_small(url)
+    cands = [small]
+    proxy = img_proxy_url(small)
+    if proxy and proxy not in cands:
+        cands.append(proxy)
+    return cands
+
+
+# 封面磁盘缓存上限（MB）：超限自动按最旧优先滚动清除。优先级：环境变量 > config.txt > 默认 200MB。
+CACHE_MB_KEY = "CORAL_LORA_COVER_CACHE_MB"
+DEFAULT_CACHE_MB = 200
+_cache_total = 0      # 进程内累计缓存字节（避免每次写都全量扫描）
+_cache_scanned = False  # 是否已做过首次全量统计
+
+
+def cover_cache_limit_bytes() -> int:
+    v = (os.environ.get(CACHE_MB_KEY) or _config_get(CACHE_MB_KEY) or "").strip()
+    try:
+        return max(10, int(float(v) * 1024 * 1024)) if v else DEFAULT_CACHE_MB * 1024 * 1024
+    except Exception:  # noqa: BLE001
+        return DEFAULT_CACHE_MB * 1024 * 1024
+
+
+def _evict_cover_cache() -> None:
+    """缓存超限就删最旧的文件，直到总量 <= 上限。首次写入时做全量扫描。"""
+    global _cache_total, _cache_scanned  # noqa: PLW0603
+    d = META_DIR / "covers"
+    if not d.is_dir():
+        _cache_total = 0
+        return
+    limit = cover_cache_limit_bytes()
+    if _cache_scanned and _cache_total <= limit:
+        return
+    # 全量扫描（首次或上一轮删过之后，重新数）
+    files, total = [], 0
+    for f in d.iterdir():
+        if f.is_file():
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            total += st.st_size
+            files.append((st.st_mtime, st.st_size, f))
+    _cache_total, _cache_scanned = total, True
+    if total <= limit:
+        return
+    files.sort(key=lambda x: x[0])  # 最旧在前，先删旧的
+    freed = 0
+    for _, size, f in files:
+        if total - freed <= limit:
+            break
+        try:
+            f.unlink()
+            freed += size
+        except OSError:
+            pass
+    _cache_total = total - freed
+
+
+def cover_fetch_bytes(cache_key, url: str) -> bytes | None:
+    """带磁盘缓存的封面抓取：缓存命中直接读本地；否则依次试候选 URL，成功写缓存。
+    已配置 API key 时带上鉴权头（部分 NSFW/登录图 403 就是缺这个）。
+    缓存超上限时自动按最旧优先滚动清除（默认 200MB，CORAL_LORA_COVER_CACHE_MB 可调）。"""
+    global _cache_total  # noqa: PLW0603
+    cache = (META_DIR / "covers") / (safe_name(str(cache_key)) + ".png")
+    if cache.exists():
+        try:
+            return cache.read_bytes()
+        except Exception:  # noqa: BLE001
+            pass
+    hdrs = {}
+    key = api_key()
+    if key:
+        hdrs["Authorization"] = f"Bearer {key}"
+    for u in cover_candidates(url):
+        try:
+            data = http_get_bytes(u, headers=hdrs, timeout=8)
+            if data:
+                try:
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                    cache.write_bytes(data)
+                    _cache_total += len(data)
+                    _evict_cover_cache()
+                except Exception:  # noqa: BLE001
+                    pass
+                return data
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
 CIVITAI_API = (os.environ.get("CORAL_LORA_API") or load_config_api() or API_SOURCES[0][1]).rstrip("/")
 
 
@@ -212,9 +365,10 @@ def api_key() -> str:
 
 def set_dl_dir(path: Path) -> None:
     """运行时切换下载/扫描目录（设置页用），并持久化到 config.txt。"""
-    global DL_DIR, META_DIR
+    global DL_DIR, META_DIR, _cache_total, _cache_scanned  # noqa: PLW0603
     DL_DIR = Path(path)
     META_DIR = DL_DIR / "_meta"
+    _cache_total, _cache_scanned = 0, False  # 缓存统计跟着新目录走
     DL_DIR.mkdir(parents=True, exist_ok=True)
     META_DIR.mkdir(parents=True, exist_ok=True)
     save_config_dir(str(DL_DIR))
@@ -228,9 +382,9 @@ def save_api_key(key: str) -> None:
         keyfile.unlink()
 
 
-def http_get_bytes(url: str, headers: dict | None = None) -> bytes:
+def http_get_bytes(url: str, headers: dict | None = None, timeout: int = TIMEOUT) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": UA, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
@@ -243,6 +397,16 @@ def cover_url_small(url: str) -> str:
     if "width=" in url:
         return re.sub(r"width=\d+", "width=320", url)
     return url
+
+
+def first_cover(model: dict) -> str | None:
+    """取封面图：优先第一版本的图；第一版没图就扫全部版本找第一张有图的（镜像 API 经常不给顶层 images）。"""
+    for vv in model.get("modelVersions") or []:
+        imgs = vv.get("images") or []
+        if imgs and imgs[0].get("url"):
+            return imgs[0]["url"]
+    imgs = model.get("images") or []
+    return imgs[0].get("url") if imgs else None
 
 
 # ---------- 便签（本地收藏打标/筛选） ----------
@@ -327,18 +491,6 @@ def download_url_for(vid) -> str:
     return f"{base}/api/download/models/{vid}"
 
 
-def dl_subdir_for(cat: str, branch: str, kind: str) -> str:
-    """下载落盘目录：先按类别分 loras/checkpoints，再按 分支-用途 建子目录（如 anima-style）。"""
-    base = {"LoRA": "loras", "Checkpoint": "checkpoints", "VAE": "vae", "Embedding": "embeddings",
-            "ControlNet": "controlnet"}.get(cat, "other")
-    parts = [safe_name(p) for p in (branch, kind) if p]
-    if len(parts) == 1:
-        return f"{base}/{parts[0]}"
-    if len(parts) >= 2:
-        return f"{base}/{parts[0]}-{parts[1]}"
-    return base
-
-
 # C站原生基座（大模型）标签：API 探测确认的合法 baseModels 值（Anima / Flux / Illustrious / Pony…）
 BASE_MODELS = [
     "SD 1.4", "SD 1.5", "SD 2.0", "SD 2.1", "SDXL 0.9", "SDXL 1.0",
@@ -379,11 +531,25 @@ def civitai_get(path: str, params: dict | None = None, headers: dict | None = No
         return json.loads(resp.read().decode("utf-8"))
 
 
+class _StripAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """下载重定向到 CDN/S3（b2 / R2 / cloudflare）时剥掉 Authorization 头：
+    urllib 会把首跳的鉴权头原样带到重定向请求，S3/R2 后端不认 → 400 Missing x-amz-content-sha256。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            for k in [k for k in list(new.headers) if k.lower() == "authorization"]:
+                del new.headers[k]
+        return new
+
+
 def civitai_download(url: str, dest: Path, dl_id: str, headers: dict, q: queue.Queue) -> None:
-    """流式下载到 dest（先 .part 后原子改名），进度经 q 上报给 GUI。"""
+    """流式下载到 dest（先 .part 后原子改名），进度经 q 上报给 GUI。
+    重定向时自动去 Authorization（否则 CDN/S3 后端 400）。"""
+    opener = urllib.request.build_opener(_StripAuthRedirect)
     req = urllib.request.Request(url, headers={"User-Agent": UA, **headers})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with opener.open(req, timeout=60) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             q.put(("dl", dl_id, {"file": str(dest), "total": total, "done": 0, "status": "downloading"}))
             tmp = dest.with_suffix(dest.suffix + ".part")
@@ -577,7 +743,7 @@ def model_meta(model: dict) -> dict:
         "creator": (model.get("creator") or {}).get("username"),
         "stats": model.get("stats") or {},
         "description": (model.get("description") or "")[:2000],
-        "cover": (v.get("images") or model.get("images") or [{}])[0].get("url"),
+        "cover": first_cover(model),
         "version": v.get("name"),
         "versionId": v.get("id"),  # 更新检测用（默认取最新版本）
         "baseModel": v.get("baseModel"),
@@ -1173,9 +1339,16 @@ class CoralApp(tk.Tk):
 
     def _cover_thread(self, mid, url):
         # 下载 + PIL 解码/缩放/转码都在工作线程；主线程只做轻量 tk.PhotoImage(data=PNG)
+        # 磁盘缓存 + 原 CDN 优先、代理兜底；瞬时失败稍等重试一次
         try:
             with self._cover_sem:
-                data = http_get_bytes(cover_url_small(url))
+                data = cover_fetch_bytes(mid, url)
+            if not data:
+                time.sleep(1.5)
+                with self._cover_sem:
+                    data = cover_fetch_bytes(mid, url)
+            if not data:
+                return
             png = _to_png_bytes(data)
             if png:
                 self.q.put(("img_png", mid, png))
@@ -1232,8 +1405,9 @@ class CoralApp(tk.Tk):
         self.status_var.set(f"开始下载: {fname} → {info['subdir']}")
 
     def _ask_download_dir(self, m):
-        """下载前确认 版本/基座 + 类别/分支/用途/关键词：决定落盘目录（如 loras/Anima-style）并顺带打便签。
-        多基座模型（同一 LoRA 适配 SDXL/Pony/Illustrious/Flux…）在版本下拉里选要下哪个。"""
+        """下载前确认 版本/基座 + 类别/子目录/分支/用途/关键词：决定落盘目录（如 loras/Anima-style）并顺带打便签。
+        多基座模型（同一 LoRA 适配 SDXL/Pony/Illustrious/Flux…）在版本下拉里选要下哪个。
+        大模型（Checkpoint）落盘时可在 checkpoints / diffusion_models 之间选（Flux/Hunyuan 等 DiT 系默认 diffusion_models）。"""
         result: dict = {}
         cat = cat_of(m)
         versions = m.get("versions") or []
@@ -1258,40 +1432,80 @@ class CoralApp(tk.Tk):
         cat_cb.set(cat_display(cat))
         cat_cb.grid(row=1, column=1, sticky="w", padx=8, pady=3)
 
-        ttk.Label(body, text="分支（基座：Anima/Flux/Illustrious…）").grid(row=2, column=0, sticky="w", pady=3)
+        # 子目录：大模型可在 checkpoints / diffusion_models 之间选（可手输其它），其它类别跟随配置
+        ttk.Label(body, text="子目录").grid(row=2, column=0, sticky="w", pady=3)
+        sub_cb = ttk.Combobox(body, width=22)
+        sub_cb.grid(row=2, column=1, sticky="w", padx=8, pady=3)
+
+        ttk.Label(body, text="分支（基座：Anima/Flux/Illustrious…）").grid(row=3, column=0, sticky="w", pady=3)
         br_cb = ttk.Combobox(body, values=known_branches(), width=22)
         br_cb.set(m.get("baseModel") or "")
-        br_cb.grid(row=2, column=1, sticky="w", padx=8, pady=3)
+        br_cb.grid(row=3, column=1, sticky="w", padx=8, pady=3)
 
-        ttk.Label(body, text="用途（默认 风格）").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(body, text="用途（默认 风格）").grid(row=4, column=0, sticky="w", pady=3)
         kind_cb = ttk.Combobox(body, values=sorted({kind_display(k) for k in
                                                     (set(KIND_PRESETS) | {t.get("kind") for t in load_tags().values() if t.get("kind")})}),
                                width=22)
         kind_cb.set("风格")
-        kind_cb.grid(row=3, column=1, sticky="w", padx=8, pady=3)
+        kind_cb.grid(row=4, column=1, sticky="w", padx=8, pady=3)
 
-        ttk.Label(body, text="关键词（逗号分隔，可选）").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(body, text="关键词（逗号分隔，可选）").grid(row=5, column=0, sticky="w", pady=3)
         kw_en = ttk.Entry(body, width=26)
-        kw_en.grid(row=4, column=1, sticky="w", padx=8, pady=3)
+        kw_en.grid(row=5, column=1, sticky="w", padx=8, pady=3)
 
         preview = tk.Label(body, text="", bg=PANEL, fg=ACCENT2, font=("", 9), anchor="w")
-        preview.grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 2))
+        preview.grid(row=6, column=0, columnspan=2, sticky="w", padx=8, pady=(10, 2))
+
+        subdir_map = load_subdir_map()
+        # DiT 系基座：ComfyUI 里这些大模型通常放 diffusion_models
+        DIT_KEYS = ("Flux", "Hunyuan", "Wan", "Qwen", "SD 3", "GLM", "SeaArt", "Zeek", "DiT", "Cascade", "AuraFlow")
+
+        def base_dir_for(cat_disp: str) -> str:
+            c = cat_canon(cat_disp) or "Other"
+            if c == "其他":
+                c = "Other"
+            return subdir_map.get(c, "other")
+
+        def on_cat(*_):
+            base = base_dir_for(cat_cb.get())
+            choices = [base]
+            if base_dir_for(cat_cb.get()) == "checkpoints" or cat_canon(cat_cb.get()) == "Checkpoint":
+                if "diffusion_models" not in choices:
+                    choices.append("diffusion_models")
+            sub_cb["values"] = choices
+            br = br_cb.get() or ""
+            if cat_canon(cat_cb.get()) == "Checkpoint" and any(k in br for k in DIT_KEYS):
+                sub_cb.set("diffusion_models")
+            else:
+                sub_cb.set(base)
+            refresh_preview()
+
+        def build_subdir() -> str:
+            base = sub_cb.get().strip().strip("/\\") or base_dir_for(cat_cb.get())
+            parts = [safe_name(p) for p in (br_cb.get().strip(), kind_canon(kind_cb.get())) if p]
+            if len(parts) == 1:
+                return f"{base}/{parts[0]}"
+            if len(parts) >= 2:
+                return f"{base}/{parts[0]}-{parts[1]}"
+            return base
 
         def refresh_preview(*_):
-            preview.config(text="将下载到: " + dl_subdir_for(cat_cb.get(), br_cb.get().strip(), kind_cb.get().strip()))
+            preview.config(text="将下载到: " + build_subdir())
 
         def on_ver(*_):
             idx = ver_cb.current()
             if 0 <= idx < len(versions):
                 br_cb.set(versions[idx].get("baseModel") or br_cb.get())
-            refresh_preview()
+            on_cat()
 
         ver_cb.bind("<<ComboboxSelected>>", on_ver)
-        for w in (cat_cb, kind_cb):
+        cat_cb.bind("<<ComboboxSelected>>", on_cat)
+        for w in (kind_cb, sub_cb):
             w.bind("<<ComboboxSelected>>", refresh_preview)
         br_cb.bind("<<ComboboxSelected>>", refresh_preview)
         br_cb.bind("<KeyRelease>", refresh_preview)
         kind_cb.bind("<KeyRelease>", refresh_preview)
+        sub_cb.bind("<KeyRelease>", refresh_preview)
 
         btns = ttk.Frame(win, padding=14)
         btns.pack(fill="x")
@@ -1299,7 +1513,7 @@ class CoralApp(tk.Tk):
         def ok():
             idx = ver_cb.current()
             chosen = versions[idx] if 0 <= idx < len(versions) else (versions[0] if versions else {})
-            result["subdir"] = dl_subdir_for(cat_cb.get(), br_cb.get().strip(), kind_cb.get().strip())
+            result["subdir"] = build_subdir()
             result["cat"] = cat_canon(cat_cb.get())
             result["branch"] = br_cb.get().strip()
             result["kind"] = kind_canon(kind_cb.get())
@@ -1313,7 +1527,7 @@ class CoralApp(tk.Tk):
 
         ttk.Button(btns, text="确定下载", style="Accent.TButton", command=ok).pack(side="left")
         ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=(8, 0))
-        refresh_preview()
+        on_cat()
         win.wait_window()
         return result or None
 
@@ -1544,12 +1758,14 @@ class CoralApp(tk.Tk):
         try:
             if url.startswith(("http://", "https://")):
                 with self._cover_sem:
-                    data = http_get_bytes(cover_url_small(url))
+                    data = cover_fetch_bytes(rel_str, url)
             else:
                 p = Path(url)
                 if not p.exists():
                     return
                 data = p.read_bytes()  # 本地预览图：零流量
+            if not data:
+                return
             png = _to_png_bytes(data)
             if png:
                 self.q.put(("local_img", rel_str, png))
@@ -1657,6 +1873,46 @@ class CoralApp(tk.Tk):
         ttk.Button(dirrow, text="更换目录", command=self._pick_dir).pack(side="left")
         ttk.Button(dirrow, text="打开目录", command=self._open_dir).pack(side="left", padx=(8, 0))
 
+        ttk.Separator(box).pack(fill="x", pady=12)
+        ttk.Label(box, text="下载目录映射（各类模型落盘的子目录，相对下载目录）",
+                  style="Card.TLabel").pack(anchor="w")
+        ttk.Label(box, text="默认 LoRA→loras / 大模型→checkpoints / VAE→vae / Embedding→embeddings / ControlNet→controlnet。"
+                           "改成你想要的子目录名后点保存，之后下载按新路径落盘（不影响已下载文件）。",
+                  style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=(2, 6))
+        self.subdir_entries: dict[str, ttk.Entry] = {}
+        _subdir_map = load_subdir_map()
+        for _label, _cat in (("LoRA", "LoRA"), ("大模型", "Checkpoint"), ("VAE", "VAE"),
+                             ("Embedding", "Embedding"), ("ControlNet", "ControlNet"), ("其他", "Other")):
+            srow = ttk.Frame(box, style="Card.TFrame")
+            srow.pack(fill="x", pady=1)
+            ttk.Label(srow, text=_label, width=12, style="Card.TLabel").pack(side="left")
+            sent = ttk.Entry(srow, width=34)
+            sent.insert(0, _subdir_map.get(_cat, ""))
+            sent.pack(side="left", padx=(6, 0))
+            self.subdir_entries[_cat] = sent
+        ttk.Button(box, text="保存目录映射", style="Accent.TButton", command=self._save_subdirs).pack(anchor="w", pady=(6, 0))
+
+        ttk.Separator(box).pack(fill="x", pady=12)
+        ttk.Label(box, text="图片代理（预览图加载不出时的兜底通道）", style="Card.TLabel").pack(anchor="w")
+        ttk.Label(box, text="默认自动用 https://images.weserv.nl 免费代理兜底（原 CDN 不可达时自动切换）；"
+                           "可填自己的代理模板（{url} 是原图地址占位），填 off 关闭代理只用原 CDN。",
+                  style="Card.TLabel", foreground=MUTED).pack(anchor="w", pady=(2, 6))
+        prows = ttk.Frame(box, style="Card.TFrame")
+        prows.pack(fill="x")
+        self.img_proxy_entry = ttk.Entry(prows, width=52)
+        self.img_proxy_entry.insert(0, load_img_proxy())
+        self.img_proxy_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(prows, text="保存", style="Accent.TButton", command=self._save_img_proxy).pack(side="left", padx=(8, 0))
+
+        crows = ttk.Frame(box, style="Card.TFrame")
+        crows.pack(fill="x", pady=(6, 0))
+        ttk.Label(crows, text="封面缓存上限(MB)", width=16, style="Card.TLabel").pack(side="left")
+        self.cache_mb_entry = ttk.Entry(crows, width=10)
+        self.cache_mb_entry.insert(0, str(max(10, cover_cache_limit_bytes() // 1048576)))
+        self.cache_mb_entry.pack(side="left", padx=(6, 0))
+        ttk.Label(crows, text="超限自动清最旧（默认 200）", style="Card.TLabel", foreground=MUTED).pack(side="left", padx=(8, 0))
+        ttk.Button(crows, text="保存", style="Accent.TButton", command=self._save_cache_mb).pack(side="left", padx=(8, 0))
+
     def _save_key(self):
         save_api_key(self.key_entry.get().strip())
         self._refresh_top_tags()
@@ -1696,6 +1952,31 @@ class CoralApp(tk.Tk):
         self._refresh_top_tags()
         self._local_dirty = True
         messagebox.showinfo("已切换", f"目录已切换为 {DL_DIR}\n重新搜索即可看到该目录里已下载的模型")
+
+    def _save_subdirs(self):
+        m = {}
+        for cat, ent in self.subdir_entries.items():
+            m[cat] = ent.get().strip().strip("/\\")
+        save_subdir_map(m)
+        self.status_var.set("下载目录映射已保存（新下载按新路径落盘）")
+        messagebox.showinfo("已保存", "下载目录映射已保存\n后续下载将按新路径落盘（不影响已下载文件）")
+
+    def _save_img_proxy(self):
+        save_img_proxy(self.img_proxy_entry.get().strip())
+        self._cover_cache.clear()  # 清了内存缓存，下次翻页按新代理重新抓
+        self.status_var.set("图片代理已保存")
+        messagebox.showinfo("已保存", "图片代理已保存\n下次加载封面生效（已缓存的封面不受影响）")
+
+    def _save_cache_mb(self):
+        v = self.cache_mb_entry.get().strip()
+        try:
+            mb = max(10, int(float(v)))
+        except (TypeError, ValueError):
+            messagebox.showwarning("无效", "请输入数字（MB）")
+            return
+        _config_set(CACHE_MB_KEY, str(mb))
+        self.status_var.set(f"封面缓存上限已设为 {mb}MB")
+        messagebox.showinfo("已保存", f"封面缓存上限 {mb}MB\n超限自动按最旧优先滚动清除")
 
     # ---------- 事件 ----------
     def _on_tab(self, _e):

@@ -63,6 +63,9 @@
   .settings { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; display: grid; gap: 12px; max-width: 560px; }
   .settings label { font-size: 12px; color: var(--muted); display: grid; gap: 6px; }
   .settings .hint { font-size: 11.5px; color: var(--muted); }
+  #subdirs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  #subdirs label { display: flex; align-items: center; gap: 8px; }
+  #subdirs input { flex: 1; }
   .local-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
   .local-row .fname { flex: 1; font-size: 13px; word-break: break-all; }
   .local-row .fsize { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -109,6 +112,9 @@
       </label>
       <div class="hint">Key 只保存在本机下载目录下的 api_key.txt，不会上传任何地方。</div>
       <div><button onclick="saveKey()">保存 Key</button></div>
+      <div class="hint" style="margin-top:6px">下载目录映射（各类模型落盘的子目录，相对下载目录）：</div>
+      <div id="subdirs"></div>
+      <div><button onclick="saveSubdirs()">保存目录映射</button></div>
     </div>
   </div>
 </div>
@@ -159,12 +165,14 @@ async function search() {
 function renderCard(m) {
   const card = document.createElement('div');
   card.className = 'card';
-  const thumb = m.cover
-    ? `style="background-image:url('${m.cover}')"`
-    : '';
   const words = (m.trainedWords || []).slice(0, 3).map(w => '`' + w + '`').join(' ');
+  const fallback = m.coverFallback ? `this.onerror=null;this.src='${esc(m.coverFallback)}'` : 'this.onerror=null';
+  const thumb = m.cover
+    ? `<img src="${esc(m.cover)}" onerror="${fallback}" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0">`
+    : '';
   card.innerHTML = `
-    <div class="thumb" ${thumb}>
+    <div class="thumb" style="position:relative">
+      ${thumb}
       ${m.nsfw ? '<span class="nsfw-badge">NSFW</span>' : ''}
     </div>
     <div class="body">
@@ -257,7 +265,7 @@ async function loadLocal() {
       row.innerHTML = `
         <div style="flex:0 0 auto">🪸</div>
         <div style="flex:1;min-width:0">
-          <div class="fname">${esc(it.file)}</div>
+          <div class="fname">${it.dir ? esc(it.dir) + '/' : ''}${esc(it.file)}</div>
           ${words ? `<div class="tags">${words}</div>` : ''}
           ${m && m.name ? `<div class="tags" style="color:var(--muted)">${esc(m.name)}${m.creator?' · by '+esc(m.creator):''}</div>` : ''}
         </div>
@@ -270,6 +278,7 @@ async function loadLocal() {
 }
 
 // ---------- 设置 ----------
+const SUBDIR_CATS = [['LoRA','LoRA'],['大模型','Checkpoint'],['VAE','VAE'],['Embedding','Embedding'],['ControlNet','ControlNet'],['其他','Other']];
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings');
@@ -278,8 +287,35 @@ async function loadSettings() {
       $('#dirTag').textContent = '📁 ' + d.dir;
       $('#keyTag').textContent = d.hasKey ? '🔑 key 已配置' : '🔑 key 未配置';
       $('#key').value = '';
+      const sd = d.subdirs || {};
+      const box = $('#subdirs');
+      box.innerHTML = '';
+      for (const [label, cat] of SUBDIR_CATS) {
+        const lab = document.createElement('label');
+        lab.textContent = label;
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.value = sd[cat] || '';
+        inp.dataset.cat = cat;
+        lab.appendChild(inp);
+        box.appendChild(lab);
+      }
     }
   } catch (e) { /* 忽略 */ }
+}
+async function saveSubdirs() {
+  const subdirs = {};
+  document.querySelectorAll('#subdirs input').forEach(inp => { subdirs[inp.dataset.cat] = inp.value.trim(); });
+  try {
+    const r = await fetch('/api/subdirs', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({ subdirs }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    toast('下载目录映射已保存');
+    loadSettings();
+  } catch (e) { toast(e.message, true); }
 }
 async function saveKey() {
   const key = $('#key').value.trim();

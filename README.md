@@ -39,6 +39,8 @@
 2. **下载** —— 一键下载本体（实时进度），**点下载先弹一个小框**：
    - **版本/基座下拉**：同一 LoRA 适配多种大模型（SDXL / Pony / Illustrious / Flux…）时，列出全部版本（名字·基座·大小），**选哪个下哪个**，分支自动跟随所选基座
    - 再确认「分支+用途」→ 自动落盘到 `分支-用途` 目录：LoRA（画风）→ `loras/Anima-style`，Checkpoint → `checkpoints/Anima-style`（**LoRA 和大模型分开对比**）
+   - **大模型落盘可选子目录**：下载 Checkpoint 时弹窗里可在 `checkpoints / diffusion_models` 之间选（Flux/Hunyuan 等 DiT 系基座默认 diffusion_models，可手输其它），每次下载自己定
+   - **下载目录映射可自定义**：设置页「下载目录映射」可改每类模型的落盘子目录（如 LoRA→loras、大模型→checkpoints、VAE→vae…），保存后持久化到 config.txt，新下载按你的路径落盘
    - 下载即打标签（类别/分支/用途/关键词），更新检测按所选版本走，ComfyUI 递归扫描子目录直接可用
 3. **元数据** —— 同时保存 JSON（名字/触发词/描述/作者/版本/versionId）
 4. **已下载标记** —— 搜索卡片上直接标 **✓ 已下载**。识别三层：
@@ -85,6 +87,9 @@
 | 项 | 方式 |
 |---|---|
 | **下载/扫描目录** | 默认自动指向 ComfyUI models 根；窗口「设置」页可换，持久化到 `config.txt`；环境变量 `CORAL_LORA_DIR` 优先级最高 |
+| **下载目录映射** | 每类模型落盘的子目录（LoRA→loras、大模型→checkpoints、VAE→vae…）；「设置」页可改，或直接编辑 `config.txt` 的 `CORAL_LORA_SUBDIR_*`；环境变量 `CORAL_LORA_SUBDIR_*` 优先级最高 |
+| **图片代理** | 预览图原 CDN（image.civitai.com）直连不稳时自动走免费代理兜底（默认 images.weserv.nl），带本地磁盘缓存（成功一次后本地直读）；可改 `config.txt` 的 `CORAL_LORA_IMG_PROXY`（`{url}` 占位原图地址，填 `off` 关闭），环境变量优先级最高 |
+| **封面缓存** | 磁盘缓存默认上限 200MB（`CORAL_LORA_COVER_CACHE_MB` 可调，设置页也能改），超限自动按最旧优先滚动清除 |
 | **API Key** | 窗口「设置」页里填，或环境变量 `CORAL_LORA_KEY`（下载 NSFW / 登录模型必需） |
 | **API 地址** | 默认官方；设置页可一键切 **civitai.red 国内镜像（直连，不烧梯子流量）**，下载地址自动跟随；环境变量 `CORAL_LORA_API` 也可改（持久化在 config.txt） |
 
