@@ -408,6 +408,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, {"ok": False, "error": f"搜索失败: {exc}"})
             return
 
+        # API: 按模型 ID 打开（EA / 未入搜索索引的模型搜不到时用）
+        if path == "/api/model":
+            try:
+                mid = qs.get("id", [""])[0].strip()
+                if not mid.isdigit():
+                    self._send(400, {"ok": False, "error": "缺少有效的模型 ID"})
+                    return
+                data = civitai_get(f"models/{mid}")
+                if not data or not data.get("id"):
+                    self._send(404, {"ok": False, "error": "没有找到该模型（ID 不存在或已删除）"})
+                    return
+                self._send(200, {"ok": True, "item": model_meta(data)})
+            except Exception as exc:  # noqa: BLE001
+                self._send(500, {"ok": False, "error": f"打开失败: {exc}"})
+            return
+
         # API: 已下载列表
         if path == "/api/local":
             self._send(200, {"ok": True, "items": local_downloads()})

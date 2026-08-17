@@ -90,6 +90,8 @@
       <option>Highest Rated</option>
     </select>
     <button onclick="search()">搜 索</button>
+    <input id="mid" type="text" placeholder="模型链接或ID（EA/搜不到时用）" style="width:230px" onkeydown="if(event.key==='Enter')openById()">
+    <button onclick="openById()" class="ghost">ID打开</button>
   </div>
 
   <div class="tabs">
@@ -143,6 +145,22 @@ function showTab(name) {
 }
 
 // ---------- 搜索 ----------
+async function openById() {
+  const raw = $('#mid').value.trim();
+  const mm = raw.match(/\/models\/(\d+)/) || raw.match(/(?:^|\D)(\d{4,})(?:\D|$)/);
+  if (!mm) { toast('请输入 C站模型链接（https://civitai.com/models/12345）或纯数字 ID', true); return; }
+  const grid = $('#grid');
+  grid.innerHTML = '<div class="empty">按 ID 打开中…</div>';
+  try {
+    const r = await fetch('/api/model?id=' + mm[1]);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error);
+    grid.innerHTML = '';
+    renderCard(d.item);
+  } catch (e) {
+    grid.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
 let dlPoller = null;
 async function search() {
   const q = $('#q').value.trim();
